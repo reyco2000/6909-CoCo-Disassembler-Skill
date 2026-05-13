@@ -69,4 +69,5 @@ Disassembly output is LWASM-compatible and includes:
 
 MIT — Built for the CoCoByte Club
 by Reinaldo Torres (Chipshift) https://github.com/reyco2000
+##Email 
 chipshift@cocobyte.co
