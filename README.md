@@ -70,3 +70,4 @@ Disassembly output is LWASM-compatible and includes:
 ## License
 
 MIT — Built for the CoCoByte Club
+by Reinaldo Torres (Chipshift) https://github.com/reyco2000
