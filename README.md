@@ -1,6 +1,6 @@
-# CoCo 6809 Disassembler Expert — Claude Code Agent
+# CoCo 6809 Disassembler Expert — Code Agent
 
-A Claude Code agent specialized in MC6809 disassembly and reverse engineering
+A Code agent specialized in MC6809 disassembly and reverse engineering
 for the TRS-80 Color Computer (CoCo) ecosystem.
 
 ## Quick Start & Installation
