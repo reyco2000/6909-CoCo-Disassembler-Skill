@@ -22,9 +22,7 @@ Claude Code natively supports the `.claude/skills` and `.claude/commands` folder
 ## Setup & Usage
 
 1. Place your CoCo ROM files or binaries in the `roms/` directory (or provide the absolute path to your binaries):
-   - `bas12.rom` — Color BASIC 1.2
    - `extbas11.rom` — Extended BASIC 1.1
-   - `disk11.rom` — Disk BASIC 1.1
    - Any program binaries (.bin, .cas) you want to analyze
 
 2. Use the available commands to analyze your binaries:
