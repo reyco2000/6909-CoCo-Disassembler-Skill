@@ -23,7 +23,16 @@ KNOWN_ROMS = {
 
 
 def identify_file(filepath: str) -> dict:
-    """Analyze a binary file and identify its format and contents."""
+    """Analyze a binary file and identify its format and contents.
+
+    Detection order matters — later checks refine earlier ones: known-ROM MD5
+    -> DECB BIN structure -> CAS leader -> size-based ROM guess -> raw.
+
+    Returns a dict with: filename, size, md5, format ("rom_image", "decb_bin",
+    "cas_tape", "rom_8k/16k/32k", "raw_binary", or "unknown"), segments
+    [(org, length)], exec_addr, rom_id, ascii_ratio, and optionally note,
+    possible_reset_vector, cas_header_offset. JSON-safe for --json output.
+    """
     with open(filepath, "rb") as f:
         data = f.read()
     
@@ -86,7 +95,9 @@ def identify_file(filepath: str) -> dict:
 
 
 def _try_decb(data: bytes):
-    """Try to parse as DECB BIN format."""
+    """Try to parse as DECB BIN: $00 LL LL AA AA segment headers, $FF exec
+    trailer. Returns ([], None) on any structural inconsistency (truncated
+    segment, zero-length first segment) so callers can fall back to raw."""
     segments = []
     exec_addr = None
     pos = 0

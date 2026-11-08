@@ -1,6 +1,6 @@
 ---
 name: analyze-rom
-description: "Deep-analyze a CoCo ROM image. Identifies ROM type, maps subroutine boundaries, documents the vector table, and produces a structured analysis of the ROM's functionality."
+description: "Use when the user asks to analyze, identify, or map the structure of a CoCo ROM image (vector table, subroutine boundaries, ROM type)."
 ---
 
 # Analyze CoCo ROM Image

@@ -1,0 +1,6 @@
+.venv/
+__pycache__/
+*.pyc
+output/
+# Commercial game files used for local analysis only
+roms/rick*/

@@ -1,40 +1,40 @@
-# CoCo 6809 Disassembler Expert — Code Agent
+# CoCo 6809 Disassembler Expert — Claude Code Agent
 
-A Code agent specialized in MC6809 disassembly and reverse engineering
+A Claude Code agent specialized in MC6809 disassembly and reverse engineering
 for the TRS-80 Color Computer (CoCo) ecosystem.
 
-## Quick Start & Installation
+## Quick Start
 
-You can use this toolset locally in this folder, or install it as a global skill in your AI coding assistants!
+```bash
+# Open this project in Claude Code
+cd coco-6809-agent
+claude
 
-### Using with Antigravity (Global Skill)
-To use these tools natively inside Antigravity from any workspace:
-1. Clone this repository to a known location on your machine (e.g., `C:\tools\coco-6809-agent`).
-2. Open Antigravity in any workspace and say: 
-   *"Please look into `C:\tools\coco-6809-agent` and help me to add this as a skill to be used globally in Antigravity."*
-3. Antigravity will automatically create a **Knowledge Item (KI)** documenting the python pipeline and FDC mappings, allowing it to seamlessly run the tools whenever you ask it to disassemble or analyze a CoCo binary.
+# Available slash commands:
+/coco-disassemble <file>   # Full disassembly with annotations
+/analyze-rom <file>        # Deep ROM image analysis
+/trace-calls <file>        # Call graph and execution flow
+/coco-help <topic>         # Quick reference lookup
+```
 
-### Using with Claude Code
-Claude Code natively supports the `.claude/skills` and `.claude/commands` folders included in this repository.
-* **Project Level**: Simply `cd` into this directory and run `claude`. The custom slash commands will be immediately available.
-* **Global Level**: To use these commands anywhere, copy the contents of the `.claude/skills` directory into your global Claude configuration (typically `~/.claude/skills/`).
+## Setup
 
-## Setup & Usage
-
-1. Place your CoCo ROM files or binaries in the `roms/` directory (or provide the absolute path to your binaries):
+1. Place your CoCo ROM files in the `roms/` directory:
+   - `bas12.rom` — Color BASIC 1.2
    - `extbas11.rom` — Extended BASIC 1.1
+   - `disk11.rom` — Disk BASIC 1.1
    - Any program binaries (.bin, .cas) you want to analyze
 
-2. Use the available commands to analyze your binaries:
-   - **`/disassemble <file>`** — Full disassembly with automatic annotation
-   - **`/analyze-rom <file>`** — Deep ROM image analysis
-   - **`/trace-calls <file>`** — Call graph and execution flow
-   - **`/coco-help <topic>`** — Quick reference lookup
+2. Open the project with Claude Code:
+   ```bash
+   claude
+   ```
 
-3. Natural language prompts also work beautifully:
-   - *"Disassemble this BASIC ML program at $3F00"*
-   - *"What ROM calls does this program make?"*
-   - *"Analyze the interrupt handling in this ROM"*
+3. Ask Claude to analyze any binary:
+   - "Disassemble this BASIC ML program at $3F00"
+   - "What ROM calls does this program make?"
+   - "Analyze the interrupt handling in this ROM"
+   - "Trace the call graph starting from the EXEC address"
 
 ## Tools
 
@@ -43,6 +43,7 @@ Claude Code natively supports the `.claude/skills` and `.claude/commands` folder
 | `tools/dasm6809.py` | Two-pass 6809 disassembler with label resolution |
 | `tools/romloader.py` | File format detection (DECB BIN, CAS, raw, known ROMs) |
 | `tools/xref.py` | Cross-reference builder (calls, jumps, data refs, strings) |
+| `tools/annotator.py` | Split / pattern-annotate / merge for chunked disassembly |
 
 ## What the Agent Knows
 
@@ -68,6 +69,3 @@ Disassembly output is LWASM-compatible and includes:
 ## License
 
 MIT — Built for the CoCoByte Club
-by Reinaldo Torres (Chipshift) https://github.com/reyco2000
-##Email 
-chipshift@cocobyte.co

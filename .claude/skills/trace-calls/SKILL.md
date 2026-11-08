@@ -1,6 +1,6 @@
 ---
 name: trace-calls
-description: "Trace the execution flow and call graph of a 6809 program. Follows JSR/BSR chains, identifies loops, and maps the complete control flow."
+description: "Use when the user asks for a call graph, call tree, execution flow, or control-flow map of a 6809/CoCo program."
 ---
 
 # Trace Call Graph
