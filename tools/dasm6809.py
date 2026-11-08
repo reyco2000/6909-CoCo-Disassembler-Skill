@@ -9,6 +9,10 @@ Supports:
   - Automatic data region detection (strings, tables, zero-fill)
   - CoCo 1/2/3 hardware labels (PIA, SAM, FDC, GIME, MMU, palette)
   - Cross-segment instruction decoding
+
+Pipeline role: first stage of the /coco-disassemble skill. Its ASM output is
+consumed by annotator.py (--split expects the EQU header, then ORG, then
+"ADDR  HEX  MNEMONIC OPERAND" lines) — keep the line format stable.
 """
 
 import sys
@@ -17,6 +21,11 @@ from typing import Optional
 
 # ===========================================================================
 # MC6809 OPCODE TABLES
+#
+# Entry format: opcode -> (mnemonic, addressing_mode, extra_operand_bytes)
+# extra_operand_bytes is the fixed operand size after the opcode; None means
+# variable length — indexed mode, where the postbyte determines the size
+# (see decode_indexed). Page 2/3 opcodes are prefixed $10/$11 respectively.
 # ===========================================================================
 
 INH  = "inherent"
@@ -170,7 +179,20 @@ OPCODES_PAGE3 = {
 REGISTER_NAMES = {0: "X", 1: "Y", 2: "U", 3: "S"}
 
 def decode_indexed(data: bytes, offset: int) -> tuple:
-    """Decode 6809 indexed addressing postbyte. Returns (text, bytes_consumed)."""
+    """Decode a 6809 indexed-addressing postbyte at data[offset].
+
+    Returns (operand_text, bytes_consumed) where bytes_consumed includes the
+    postbyte itself plus any offset bytes (1-3 total).
+
+    Postbyte layout:
+      bit 7 = 0: 5-bit signed offset in bits 4-0, register in bits 6-5
+      bit 7 = 1: mode in bits 4-0 (bit 4 doubles as the indirect flag for
+                 most modes), register in bits 6-5
+
+    Known limitation: only the non-indirect mode encodings ($00-$0D, $1F) are
+    decoded. Indirect variants such as [,R++] ($11) or [n,PCR] ($1C/$1D) fall
+    through to a raw "<idx:XX>" placeholder rather than being decoded.
+    """
     if offset >= len(data):
         return ("???", 1)
 
@@ -270,6 +292,10 @@ PUSH_REGS_U = {0x01: "CC", 0x02: "A", 0x04: "B", 0x08: "DP",
                0x10: "X",  0x20: "Y", 0x40: "S", 0x80: "PC"}
 
 def decode_push_pull(postbyte: int, use_s_stack: bool = True) -> str:
+    """Decode a PSHS/PULS/PSHU/PULU register-mask postbyte to "CC,A,B,...".
+
+    Bit 6 names the *other* stack pointer: U on the S stack, S on the U stack.
+    """
     regs = PUSH_REGS_S if use_s_stack else PUSH_REGS_U
     result = []
     for bit in [0x01, 0x02, 0x04, 0x08, 0x10, 0x20, 0x40, 0x80]:
@@ -284,6 +310,7 @@ TFR_REGS = {
 }
 
 def decode_tfr_exg(postbyte: int) -> str:
+    """Decode a TFR/EXG postbyte (source register in the high nibble)."""
     src = TFR_REGS.get((postbyte >> 4) & 0x0F, "??")
     dst = TFR_REGS.get(postbyte & 0x0F, "??")
     return f"{src},{dst}"
@@ -371,73 +398,80 @@ def rom_comment(addr: int) -> str:
     return ""
 
 
-# Hardware I/O addresses — CoCo 1/2/3
+# Hardware I/O addresses — CoCo 1/2/3.
+# Names and meanings match reference/coco_memory_map.md, which was validated
+# against ROM code and the XRoar/MAME/VCC sources; keep the two in sync.
 HW_LABELS = {
-    # PIA 0 - keyboard / joystick
+    # PIA 0 - keyboard / joystick; CA1=HSYNC, CB1=VSYNC -> CPU IRQ
     0xFF00: "PIA0_DA",   0xFF01: "PIA0_CA",   0xFF02: "PIA0_DB",   0xFF03: "PIA0_CB",
-    # PIA 1 - VDG / sound / cassette
+    # PIA 1 - DAC / cassette / RS-232 / VDG; CA1=CD, CB1=CART -> CPU FIRQ
     0xFF20: "PIA1_DA",   0xFF21: "PIA1_CA",   0xFF22: "PIA1_DB",   0xFF23: "PIA1_CB",
-    # FDC - floppy disk controller
-    0xFF40: "DSK_CMD",   0xFF41: "DSK_TRK",   0xFF42: "DSK_SEC",   0xFF43: "DSK_DAT",
-    0xFF48: "DSK_CTL",
+    # Disk: control latch at $FF40, WD179x at $FF48-$FF4B
+    0xFF40: "DSKREG",
+    0xFF48: "FDCREG",    0xFF49: "FDC_TRK",   0xFF4A: "FDC_SEC",   0xFF4B: "FDC_DAT",
     # GIME registers (CoCo 3)
     0xFF90: "GIME_INIT0",  0xFF91: "GIME_INIT1",  0xFF92: "GIME_IRQEN",
     0xFF93: "GIME_FIRQEN", 0xFF94: "GIME_TMRHI",  0xFF95: "GIME_TMRLO",
     0xFF98: "GIME_VMODE",  0xFF99: "GIME_VRES",   0xFF9A: "GIME_BORDER",
-    0xFF9B: "GIME_VSCRL",  0xFF9C: "GIME_VOFFHI", 0xFF9D: "GIME_VOFFLO",
-    0xFF9E: "GIME_HOFFHI", 0xFF9F: "GIME_HOFFLO",
-    # MMU registers (CoCo 3) — Task 0
-    0xFFA0: "MMU_T0_P0",  0xFFA1: "MMU_T0_P1",  0xFFA2: "MMU_T0_P2",
-    0xFFA3: "MMU_T0_P3",  0xFFA4: "MMU_T0_P4",  0xFFA5: "MMU_T0_P5",
-    0xFFA6: "MMU_T0_P6",  0xFFA7: "MMU_T0_P7",
-    # MMU registers — Task 1
-    0xFFA8: "MMU_T1_P0",  0xFFA9: "MMU_T1_P1",  0xFFAA: "MMU_T1_P2",
-    0xFFAB: "MMU_T1_P3",  0xFFAC: "MMU_T1_P4",  0xFFAD: "MMU_T1_P5",
-    0xFFAE: "MMU_T1_P6",  0xFFAF: "MMU_T1_P7",
+    0xFF9B: "GIME_EXTBANK", 0xFF9C: "GIME_VSCRL", 0xFF9D: "GIME_VOFFHI",
+    0xFF9E: "GIME_VOFFLO", 0xFF9F: "GIME_HOFF",
+    # MMU registers (CoCo 3)
+    **{0xFFA0 + i: f"MMU_T{i // 8}_P{i % 8}" for i in range(16)},
     # GIME palette registers (CoCo 3)
-    0xFFB0: "PAL_0",  0xFFB1: "PAL_1",  0xFFB2: "PAL_2",  0xFFB3: "PAL_3",
-    0xFFB4: "PAL_4",  0xFFB5: "PAL_5",  0xFFB6: "PAL_6",  0xFFB7: "PAL_7",
-    0xFFB8: "PAL_8",  0xFFB9: "PAL_9",  0xFFBA: "PAL_10", 0xFFBB: "PAL_11",
-    0xFFBC: "PAL_12", 0xFFBD: "PAL_13", 0xFFBE: "PAL_14", 0xFFBF: "PAL_15",
-    # SAM registers
-    0xFFC0: "SAM_V0CLR", 0xFFC1: "SAM_V0SET", 0xFFC2: "SAM_V1CLR",
-    0xFFC3: "SAM_V1SET", 0xFFC4: "SAM_V2CLR", 0xFFC5: "SAM_V2SET",
-    0xFFC6: "SAM_F0CLR", 0xFFC7: "SAM_F0SET",
-    0xFFD4: "SAM_P1",
-    0xFFD8: "SAM_R0CLR", 0xFFD9: "SAM_R0SET",
-    0xFFDE: "SAM_ROMOFF", 0xFFDF: "SAM_ROMON",
+    **{0xFFB0 + i: f"PAL_{i}" for i in range(16)},
+    # SAM bit pairs: even address clears the bit, odd address sets it
+    **{0xFFC0 + 2 * i + s: f"SAM_{bit}{'SET' if s else 'CLR'}"
+       for i, bit in enumerate(["V0", "V1", "V2", "F0", "F1", "F2", "F3", "F4",
+                                "F5", "F6", "P1", "R0", "R1", "M0", "M1", "TY"])
+       for s in (0, 1)},
+    # CPU vectors
+    0xFFF0: "VEC_TRAP",  0xFFF2: "VEC_SWI3",  0xFFF4: "VEC_SWI2",  0xFFF6: "VEC_FIRQ",
+    0xFFF8: "VEC_IRQ",   0xFFFA: "VEC_SWI",   0xFFFC: "VEC_NMI",   0xFFFE: "VEC_RESET",
 }
 
-# Hardware I/O descriptions — CoCo 3 GIME/MMU/Palette + SAM
+# Hardware I/O descriptions (comment text after the label)
 HW_DESCRIPTIONS = {
-    0xFF90: "Init 0: COCO|MMUEN|IEN|FEN|MC3-0",
-    0xFF91: "Init 1: timer input, task select",
-    0xFF92: "IRQ enable: TMR|HBORD|VBORD|EI2-0",
-    0xFF93: "FIRQ enable: TMR|HBORD|VBORD|EI2-0",
-    0xFF94: "Timer MSB (12-bit countdown)",
-    0xFF95: "Timer LSB (12-bit countdown)",
-    0xFF98: "Video mode: BP|BPI|MOCH|H50|LPR",
-    0xFF99: "Video res: LPF|HRES|CRES",
-    0xFF9A: "Border color (6-bit palette index)",
-    0xFF9B: "Vertical scroll (4-bit)",
-    0xFF9C: "Video offset MSB",
-    0xFF9D: "Video offset LSB",
-    0xFF9E: "Horizontal offset MSB",
-    0xFF9F: "Horizontal offset LSB",
-    # MMU Task 0
-    0xFFA0: "Task0 page0 ($0000-$1FFF)", 0xFFA1: "Task0 page1 ($2000-$3FFF)",
-    0xFFA2: "Task0 page2 ($4000-$5FFF)", 0xFFA3: "Task0 page3 ($6000-$7FFF)",
-    0xFFA4: "Task0 page4 ($8000-$9FFF)", 0xFFA5: "Task0 page5 ($A000-$BFFF)",
-    0xFFA6: "Task0 page6 ($C000-$DFFF)", 0xFFA7: "Task0 page7 ($E000-$FEFF)",
-    # MMU Task 1
-    0xFFA8: "Task1 page0 ($0000-$1FFF)", 0xFFA9: "Task1 page1 ($2000-$3FFF)",
-    0xFFAA: "Task1 page2 ($4000-$5FFF)", 0xFFAB: "Task1 page3 ($6000-$7FFF)",
-    0xFFAC: "Task1 page4 ($8000-$9FFF)", 0xFFAD: "Task1 page5 ($A000-$BFFF)",
-    0xFFAE: "Task1 page6 ($C000-$DFFF)", 0xFFAF: "Task1 page7 ($E000-$FEFF)",
-    # Palette
-    **{0xFFB0 + i: f"Palette {i} (6-bit RGB)" for i in range(16)},
+    0xFF00: "PIA0 port A: keyboard rows in, b7 joystick comparator",
+    0xFF01: "PIA0 ctrl A: HSYNC IRQ, CA2 joystick axis select",
+    0xFF02: "PIA0 port B: keyboard column strobe",
+    0xFF03: "PIA0 ctrl B: VSYNC IRQ, CB2 joystick port select",
+    0xFF20: "PIA1 port A: b7-2 DAC, b1 RS-232 out, b0 cassette in",
+    0xFF21: "PIA1 ctrl A: CD FIRQ, CA2 cassette motor",
+    0xFF22: "PIA1 port B: A/G|GM2|GM1|GM0|CSS|RAMSZ|sound|RS-232 in",
+    0xFF23: "PIA1 ctrl B: CART FIRQ, CB2 sound enable",
+    0xFF40: "Disk control latch: drive sel|motor|precomp|density|side|HALT",
+    0xFF48: "WD179x command (W) / status (R)",
+    0xFF49: "WD179x track register",
+    0xFF4A: "WD179x sector register",
+    0xFF4B: "WD179x data register",
+    0xFF90: "Init 0: COCO|MMUEN|IEN|FEN|MC3|MC2|MC1|MC0",
+    0xFF91: "Init 1: MTYP|TINS|TR (b0 task select)",
+    0xFF92: "IRQ enable / read=pending+ack: TMR|HBORD|VBORD|EI2-0",
+    0xFF93: "FIRQ enable / read=pending+ack: TMR|HBORD|VBORD|EI2-0",
+    0xFF94: "Timer bits 11-8 (write restarts timer)",
+    0xFF95: "Timer bits 7-0",
+    0xFF98: "Video mode: BP|-|BPI|MOCH|H50|LPR2-0",
+    0xFF99: "Video res: -|LPF1-0|HRES2-0|CRES1-0",
+    0xFF9A: "Border colour (6-bit)",
+    0xFF9B: "2MB/8MB upgrade bank (unused on stock GIME)",
+    0xFF9C: "Vertical fine scroll (4-bit)",
+    0xFF9D: "Video start phys addr bits 18-11",
+    0xFF9E: "Video start phys addr bits 10-3",
+    0xFF9F: "HVEN|horizontal offset (2-byte units)",
+    **{0xFFA0 + i: f"Task{i // 8} page{i % 8} (${(i % 8) * 0x2000:04X}-"
+                   f"${(i % 8) * 0x2000 + (0x1EFF if i % 8 == 7 else 0x1FFF):04X})"
+       for i in range(16)},
+    **{0xFFB0 + i: f"Palette {i} (6-bit R1G1B1R0G0B0)" for i in range(16)},
+    0xFFC9: "SAM F1=1 (display offset; $0400 text page)",
+    0xFFD8: "SAM R1=0: CPU slow 0.89 MHz",
+    0xFFD9: "SAM R1=1: CPU fast 1.79 MHz",
+    0xFFDE: "SAM TY=0: ROM mode",
+    0xFFDF: "SAM TY=1: all-RAM mode",
+    0xFFF0: "6309 trap vector (reserved on 6809)",
+    0xFFF2: "SWI3 vector", 0xFFF4: "SWI2 vector", 0xFFF6: "FIRQ vector",
+    0xFFF8: "IRQ vector",  0xFFFA: "SWI vector",  0xFFFC: "NMI vector",
+    0xFFFE: "RESET vector",
 }
-
 
 def hw_comment(addr: int) -> str:
     """Get hardware comment for I/O addresses."""
@@ -453,7 +487,7 @@ def hw_comment(addr: int) -> str:
     if 0xFF20 <= addr <= 0xFF23:
         return "; PIA1 (VDG/sound/cassette)"
     if 0xFF40 <= addr <= 0xFF4F:
-        return "; FDC (floppy disk controller)"
+        return "; Disk controller I/O"
     if 0xFF90 <= addr <= 0xFF9F:
         return "; GIME register"
     if 0xFFA0 <= addr <= 0xFFAF:
@@ -470,8 +504,12 @@ def hw_comment(addr: int) -> str:
 # ===========================================================================
 
 class MemoryImage:
-    """Represents a sparse memory image built from DECB segments.
-    Tracks which addresses are populated vs. gaps."""
+    """Sparse 64K memory image built from one or more load segments.
+
+    Tracks which addresses are populated so multi-segment DECB files can be
+    disassembled as a single address space: instructions may span segment
+    boundaries, and gaps between segments produce fresh ORG directives.
+    """
 
     def __init__(self):
         self.data = bytearray(0x10000)  # 64K address space
@@ -570,9 +608,19 @@ def detect_data_regions(mem: MemoryImage, code_addrs: set, ranges: list) -> dict
 # ===========================================================================
 
 class Disassembler6809:
+    """Two-pass linear-sweep disassembler over a MemoryImage.
+
+    Pass 1 decodes every populated address to collect branch/call targets
+    (which become L_xxxx/SUB_xxxx labels) and backward branches (loop
+    markers). Pass 2 re-decodes and emits text, replacing detected data
+    regions with FCC/FCB/RMB directives. Linear sweep means bytes that are
+    actually data may decode as bogus instructions until detect_data_regions
+    classifies them.
+    """
+
     def __init__(self, mem: MemoryImage, entry_addr: int = None):
-        """Initialize with a unified MemoryImage.
-        entry_addr: exec address or primary entry point (for labeling)."""
+        """entry_addr: DECB exec address or primary entry point; used for
+        the END directive and entry labeling."""
         self.mem = mem
         self.entry_addr = entry_addr
         self.labels: dict[int, str] = {}
@@ -584,6 +632,7 @@ class Disassembler6809:
         self.data_regions: dict[int, str] = {}
 
     def addr_label(self, addr: int) -> str:
+        """Best label for an address: ROM name > HW name > generated > $hex."""
         if addr in ROM_LABELS:
             return ROM_LABELS[addr]
         if addr in HW_LABELS:
@@ -593,6 +642,8 @@ class Disassembler6809:
         return f"${addr:04X}"
 
     def add_target_label(self, addr: int, is_call: bool = False):
+        """Register a branch/call target, generating SUB_xxxx (call) or
+        L_xxxx (jump/branch) labels for addresses without a known name."""
         if is_call:
             self.call_targets.add(addr)
             if addr not in ROM_LABELS and addr not in HW_LABELS:
@@ -715,7 +766,13 @@ class Disassembler6809:
         return (mnemonic, operand, consumed, comment)
 
     def disassemble(self, show_hex: bool = True, annotate: bool = False) -> str:
-        """Full two-pass disassembly of all populated ranges."""
+        """Full two-pass disassembly of all populated ranges.
+
+        show_hex: include the address + raw-bytes columns (annotator.py's
+        line parser requires this format).
+        annotate: add ROM-call descriptions, "loop back" markers on backward
+        branches, subroutine separators, and data-region headers.
+        """
         ranges = self.mem.get_contiguous_ranges()
 
         # Pass 1: scan all code to find labels and detect backward branches
@@ -793,7 +850,8 @@ class Disassembler6809:
         return self._format_output(show_hex, annotate)
 
     def _resolve_branch_target(self, operand: str) -> Optional[int]:
-        """Resolve an operand to an absolute address."""
+        """Resolve an operand string ("$XXXX", ROM name, or generated label)
+        back to its absolute address; None if it isn't a known target."""
         if operand.startswith("$") and len(operand) == 5:
             try:
                 return int(operand[1:], 16)
@@ -808,6 +866,9 @@ class Disassembler6809:
         return None
 
     def _format_output(self, show_hex: bool = True, annotate: bool = False) -> str:
+        """Render self.lines as LWASM-compatible text: EQU header (ROM calls
+        and HW addresses actually used), memory-range summary, then code with
+        an ORG directive at every gap between populated regions."""
         out = []
 
         # Header: EQU definitions for ROM calls found
@@ -917,7 +978,11 @@ class Disassembler6809:
 
 def load_decb_bin(data: bytes) -> tuple:
     """Parse RS-DOS DECB BIN format.
-    Returns (list of (org, data) segments, exec_addr)."""
+
+    Layout: repeated segments of $00 LL LL AA AA <LL bytes>, terminated by an
+    exec trailer $FF 00 00 AA AA. Returns ([(org, bytes), ...], exec_addr);
+    exec_addr is None if the trailer is missing.
+    """
     segments = []
     exec_addr = None
     pos = 0
@@ -942,6 +1007,72 @@ def load_decb_bin(data: bytes) -> tuple:
     return segments, exec_addr
 
 
+
+def decb_is_valid(data: bytes, segments: list, exec_addr) -> bool:
+    """True if load_decb_bin() output describes the whole file consistently:
+    at least one non-empty segment, no truncated segment, and an exec trailer.
+    Guards against raw code that merely starts with $00 (NEG <$xx)."""
+    if not segments or exec_addr is None:
+        return False
+    consumed = sum(5 + len(d) for _, d in segments) + 5
+    if any(len(d) == 0 for _, d in segments):
+        return False
+    return consumed <= len(data)
+
+
+def guess_raw_origin(data: bytes) -> tuple:
+    """Infer the load address of a raw image from its content.
+
+    Returns (org, reason). Signatures were checked against real ROM images:
+    Disk BASIC starts "DK" ($C000), Extended BASIC starts "EX" ($8000),
+    Color BASIC starts with 7 vectors into $A000-$BFFF ($A000), and a 32K
+    image ending in a $8000-$FFFF reset vector is a CoCo 3 ROM ($8000).
+    Other 8K/16K images default to the cartridge slot ($C000). Anything else
+    falls back to $0E00 (BASIC program area) and the reason says so.
+    """
+    n = len(data)
+    if n == 32768 and 0x8000 <= (data[-2] << 8 | data[-1]) <= 0xFFFE:
+        return 0x8000, "32K image with reset vector (CoCo 3 ROM)"
+    if n >= 2 and data[:2] == b"DK":
+        return 0xC000, "Disk BASIC signature 'DK'"
+    if n >= 2 and data[:2] == b"EX":
+        return 0x8000, "Extended BASIC signature 'EX'"
+    if n == 8192 and all(0xA000 <= (data[i] << 8 | data[i + 1]) <= 0xBFFF
+                         for i in range(0, 14, 2)):
+        return 0xA000, "Color BASIC vector table"
+    if n in (8192, 16384):
+        return 0xC000, f"{n // 1024}K image, assumed cartridge ROM"
+    return 0x0E00, "no signature found; defaulted to $0E00 (pass --org)"
+
+
+def load_input(raw: bytes, org: int = None, force_raw: bool = False) -> tuple:
+    """Build a MemoryImage from a file's bytes; shared by dasm6809 and xref
+    so both tools always see identical addresses for the same flags.
+
+    DECB BIN is used when the file starts with $00 and parses consistently
+    (see decb_is_valid) unless force_raw. Otherwise the data is loaded raw
+    at org, or at guess_raw_origin() when org is None.
+    Returns (mem, exec_addr, description) — description goes to stderr.
+    """
+    mem = MemoryImage()
+    if not force_raw and len(raw) > 5 and raw[0] == 0x00:
+        segments, exec_addr = load_decb_bin(raw)
+        if decb_is_valid(raw, segments, exec_addr):
+            for seg_org, seg_data in segments:
+                mem.load_segment(seg_org, seg_data)
+            lines = [f"; DECB BIN format — {len(segments)} segment(s)",
+                     f"; Exec address: ${exec_addr:04X}"]
+            lines += [f";   Segment {i}: ${a:04X}-${a + len(d) - 1:04X} ({len(d)} bytes)"
+                      for i, (a, d) in enumerate(segments)]
+            return mem, exec_addr, "\n".join(lines)
+    if org is not None:
+        reason = "from --org"
+    else:
+        org, reason = guess_raw_origin(raw)
+    mem.load_segment(org, raw)
+    end = org + len(raw) - 1
+    return mem, None, f"; Raw image at ${org:04X}-${end:04X} ({reason})"
+
 # ===========================================================================
 # CLI ENTRY POINT
 # ===========================================================================
@@ -950,7 +1081,8 @@ def main():
     parser = argparse.ArgumentParser(description="MC6809 Disassembler for CoCo")
     parser.add_argument("file", help="Binary file to disassemble")
     parser.add_argument("--org", type=lambda x: int(x, 0), default=None,
-                        help="Origin address (hex, e.g. 0x0E00). Auto-detected for DECB BIN.")
+                        help="Origin address (hex, e.g. 0x0E00). Auto-detected for DECB BIN; "
+                             "inferred from ROM signatures for raw images.")
     parser.add_argument("--output", "-o", help="Output file (default: stdout)")
     parser.add_argument("--no-hex", action="store_true", help="Omit hex dump column")
     parser.add_argument("--raw", action="store_true",
@@ -962,25 +1094,8 @@ def main():
     with open(args.file, "rb") as f:
         raw = f.read()
 
-    mem = MemoryImage()
-    exec_addr = None
-
-    if not args.raw and len(raw) > 5 and raw[0] in (0x00, 0xFF):
-        segments, exec_addr = load_decb_bin(raw)
-        if segments:
-            print(f"; DECB BIN format — {len(segments)} segment(s)", file=sys.stderr)
-            if exec_addr is not None:
-                print(f"; Exec address: ${exec_addr:04X}", file=sys.stderr)
-            for i, (seg_org, seg_data) in enumerate(segments):
-                print(f";   Segment {i}: ${seg_org:04X}-${seg_org+len(seg_data)-1:04X} ({len(seg_data)} bytes)", file=sys.stderr)
-                mem.load_segment(seg_org, seg_data)
-        else:
-            # Not valid DECB, treat as raw
-            org = args.org if args.org is not None else 0x0E00
-            mem.load_segment(org, raw)
-    else:
-        org = args.org if args.org is not None else 0x0E00
-        mem.load_segment(org, raw)
+    mem, exec_addr, desc = load_input(raw, args.org, args.raw)
+    print(desc, file=sys.stderr)
 
     dasm = Disassembler6809(mem, entry_addr=exec_addr)
     output = dasm.disassemble(show_hex=not args.no_hex, annotate=args.annotate)

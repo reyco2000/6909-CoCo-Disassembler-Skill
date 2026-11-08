@@ -5,6 +5,21 @@ Usage:
   Split:    python3 annotator.py --split --asm file.asm --sections sections.json --output-dir chunks/
   Annotate: python3 annotator.py --annotate --manifest chunks/manifest.json --ref-dir reference/
   Merge:    python3 annotator.py --merge --manifest chunks/manifest.json --output annotated.asm
+
+Pipeline: dasm6809.py produces the ASM, xref.py --sections produces the chunk
+boundaries, then this tool runs split -> annotate -> merge. Chunk files may
+also be edited in between (e.g. LLM-added comments); merge only requires that
+the CODE_MARKER line and everything after it survive.
+
+Chunk file layout (written by split, relied on by merge):
+  EQU header (copied from the source ASM, for assembler context)
+  "; CHUNK n of m ..." context block (subroutines, ROM calls, xrefs)
+  CODE_MARKER line
+  code body (with a synthesized ORG if the chunk didn't start with one)
+
+manifest.json lists every chunk (id, filename, absolute path, address range,
+line count, subroutine/ROM-call/HW-access summaries) and is the only file the
+driving agent needs to read.
 """
 
 import sys
@@ -18,10 +33,13 @@ CODE_MARKER = "; --- BEGIN CODE ---"
 
 def extract_header(asm_lines: list[str]) -> tuple[list[str], int]:
     """Extract the EQU header block from the ASM file.
-    Returns (header_lines, first_code_line_index)."""
+
+    The header is everything before the first ORG directive (which dasm6809
+    emits indented, hence the "ORG anywhere past column 16" fallback).
+    Returns (header_lines, first_code_line_index).
+    """
     header = []
     i = 0
-    in_header = True
     for i, line in enumerate(asm_lines):
         stripped = line.strip()
         # Header ends at first ORG directive
@@ -57,7 +75,14 @@ def find_line_for_address(asm_lines: list[str], start_idx: int, target_addr: int
 # ============================================================
 
 class PatternAnnotator:
-    """Adds deterministic pattern-based comments to disassembly chunks."""
+    """Adds deterministic pattern-based comments to disassembly chunks.
+
+    Lookup tables are parsed from the markdown tables in the reference/
+    directory (rom_entry_points.md, coco_memory_map.md), so updating those
+    files extends annotation coverage without code changes. annotate_file()
+    rewrites each chunk in place and is idempotent: lines that already carry
+    a substantial comment are left alone.
+    """
 
     def __init__(self, ref_dir: str):
         self.rom_calls = {}   # addr_int -> (name, description)
@@ -65,6 +90,10 @@ class PatternAnnotator:
         self.dp_vars = {}     # addr_int -> (name, description)
         self.dskcon_vars = {} # addr_int -> (name, description)
         self._load_references(ref_dir)
+        # Reverse map so symbolic operands from dasm6809 (e.g. "GIME_INIT0")
+        # resolve to addresses; names are kept identical to dasm6809.HW_LABELS.
+        self._hw_names = {name: addr for addr, (name, _) in self.hw_regs.items()}
+        self._replace = False
 
     def _load_references(self, ref_dir: str):
         """Parse reference markdown files into lookup dicts."""
@@ -132,7 +161,12 @@ class PatternAnnotator:
 
         for i, line in enumerate(lines):
             comment = self._analyze_line(line, lines, i)
-            if comment and comment not in line:
+            if comment and self._replace and comment not in line:
+                # Replace dasm6809's generic register comment with the decode
+                code, _ = line.split(";", 1)
+                new_lines.append(f"{code}{comment}\n")
+                added += 1
+            elif comment and comment not in line:
                 # Append comment to existing line
                 stripped = line.rstrip("\n")
                 # Pad to column 50 for alignment if line is shorter
@@ -149,19 +183,34 @@ class PatternAnnotator:
         return added
 
     def _analyze_line(self, line: str, all_lines: list[str], idx: int) -> str | None:
-        """Analyze a single disassembly line and return a comment or None."""
+        """Analyze a single disassembly line and return a comment or None.
+
+        Expects dasm6809's hex-dump format ("  C000  BD A5 9A   JSR  CLS");
+        lines that don't match are skipped. Only literal $XXXX / <$XX
+        operands are resolved — symbolic operands (e.g. "JSR CLS") are left
+        to dasm6809 --annotate, which already commented them.
+        all_lines/idx allow looking at neighbors, e.g. the preceding
+        LDA/LDB #imm for value-aware GIME/MMU/palette decodes.
+        """
         stripped = line.strip()
 
         # Skip comment-only lines, labels, directives, empty lines
         if not stripped or stripped.startswith(";") or stripped.startswith("ORG"):
             return None
 
-        # Already has a substantial comment? Skip.
+        # Already has a substantial comment? Skip — unless it is dasm6809's
+        # generic "LABEL - description" comment on a GIME/MMU/palette
+        # register, which a value-aware decode can improve (annotate_file
+        # then replaces the comment instead of appending).
+        self._replace = False
         if ";" in line:
-            # Check if existing comment is just a basic one we can enhance
             comment_part = line.split(";", 1)[1].strip()
             if len(comment_part) > 5:
-                return None
+                first = comment_part.split(" - ", 1)[0].strip()
+                reg = self._hw_names.get(first)
+                if reg is None or not (0xFF90 <= reg <= 0xFFBF):
+                    return None
+                self._replace = True
 
         # Extract instruction mnemonic and operand from the disassembly line
         # Format: "  C000  BD A5 9A          JSR     CLS"
@@ -191,44 +240,40 @@ class PatternAnnotator:
                         "ORA", "ORB", "ANDA", "ANDB", "EORA", "EORB",
                         "BITA", "BITB", "TST", "CLR", "COM", "INC", "DEC"):
             addr = self._parse_operand_address(operand)
-            if addr is not None:
-                if addr in self.hw_regs:
-                    name, desc = self.hw_regs[addr]
-                    return f"; {name} - {desc}"
-                # FDC registers
-                if 0xFF40 <= addr <= 0xFF4F:
-                    fdc_names = {
-                        0xFF40: "FDC Command/Status",
-                        0xFF41: "FDC Track register",
-                        0xFF42: "FDC Sector register",
-                        0xFF43: "FDC Data register",
-                        0xFF48: "Drive control (select/motor/density)",
-                    }
-                    if addr in fdc_names:
-                        return f"; {fdc_names[addr]}"
-                # SAM registers
-                if 0xFFC0 <= addr <= 0xFFDF:
-                    return f"; SAM register ${addr:04X}"
-                # GIME registers (CoCo 3) — value-aware decode
-                if 0xFF90 <= addr <= 0xFF9F:
-                    value = self._find_preceding_immediate(all_lines, idx)
-                    if value is not None:
+            if addr is not None and 0xFF90 <= addr <= 0xFFBF:
+                # Value-aware decodes first (store of a preceding LDA/LDB #imm)
+                value = self._find_preceding_immediate(all_lines, idx, mnemonic)
+                if value is not None:
+                    if addr <= 0xFF9F:
                         decode = self._decode_gime_value(addr, value)
                         if decode:
                             name = self.hw_regs.get(addr, (f"GIME_{addr:04X}", ""))[0]
                             return f"; {name} - {decode}"
-                    if addr in self.hw_regs:
-                        name, desc = self.hw_regs[addr]
-                        return f"; {name} - {desc}"
+                    elif addr <= 0xFFAF:
+                        return self._decode_mmu_write(addr, value)
+                    else:
+                        return self._decode_palette_write(addr, value)
+            if self._replace:
+                return None  # nothing better than the existing comment
+            if addr is not None:
+                if addr in self.hw_regs:
+                    name, desc = self.hw_regs[addr]
+                    return f"; {name} - {desc}"
+                # Disk controller: named registers come from the reference
+                # (DSKREG $FF40, WD179x $FF48-$FF4B); anything else in the
+                # $FF40-$FF5F SCS window is cartridge I/O.
+                if 0xFF40 <= addr <= 0xFF5F:
+                    return f"; Disk/cartridge SCS I/O ${addr:04X}"
+                # SAM registers
+                if 0xFFC0 <= addr <= 0xFFDF:
+                    return f"; SAM register ${addr:04X}"
+                # GIME / MMU / palette without a known value
+                if 0xFF90 <= addr <= 0xFF9F:
                     return f"; GIME register ${addr:04X}"
-                # MMU registers (CoCo 3) — value-aware decode
                 if 0xFFA0 <= addr <= 0xFFAF:
-                    value = self._find_preceding_immediate(all_lines, idx)
-                    return self._decode_mmu_write(addr, value)
-                # Palette registers (CoCo 3) — value-aware decode
+                    return self._decode_mmu_write(addr, None)
                 if 0xFFB0 <= addr <= 0xFFBF:
-                    value = self._find_preceding_immediate(all_lines, idx)
-                    return self._decode_palette_write(addr, value)
+                    return self._decode_palette_write(addr, None)
 
         # --- Direct-page access to known BASIC/system variables ---
         if mnemonic in ("LDA", "LDB", "LDD", "STA", "STB", "STD",
@@ -283,16 +328,12 @@ class PatternAnnotator:
         return None
 
     def _parse_operand_address(self, operand: str) -> int | None:
-        """Extract absolute address from operand like '$FF40', '#$FF40', 'CLS', etc."""
-        # Direct hex address: $XXXX
-        m = re.match(r'^\$([0-9A-Fa-f]{4})$', operand)
+        """Extract an absolute address from '$FF40' or a hardware label such
+        as 'GIME_INIT0' (as emitted by dasm6809). Immediates return None."""
+        m = re.match(r'^>?\$([0-9A-Fa-f]{4})$', operand)
         if m:
             return int(m.group(1), 16)
-        # Immediate with address: #$XXXX (for LDX #$addr etc)
-        m = re.match(r'^#\$([0-9A-Fa-f]{4})$', operand)
-        if m:
-            return None  # Don't annotate immediates as memory access
-        return None
+        return self._hw_names.get(operand.lstrip('>'))
 
     def _parse_dp_address(self, operand: str) -> int | None:
         """Extract direct-page address from operand like '<$5F' or '<$EA'."""
@@ -301,29 +342,66 @@ class PatternAnnotator:
             return int(m.group(1), 16)
         return None
 
-    def _find_preceding_immediate(self, all_lines: list[str], idx: int) -> int | None:
-        """Look backward up to 3 lines for LDA/LDB #$xx, return the value."""
-        for j in range(max(0, idx - 3), idx):
-            m = re.match(r'^\s*[0-9A-Fa-f]{4}\s+(?:[0-9A-Fa-f]{2}\s+)+\s*LD[AB]\s+#\$([0-9A-Fa-f]{2})',
-                         all_lines[j].strip(), re.IGNORECASE)
-            if m:
-                return int(m.group(1), 16)
+    def _find_preceding_immediate(self, all_lines: list[str], idx: int,
+                                  mnemonic: str = "STA") -> int | None:
+        """Return the 8-bit value a store writes, when knowable.
+
+        CLR writes 0. For STA/STB, look back up to 3 instruction lines for
+        the most recent load of the same register (LDA/LDB #$xx); any other
+        instruction that targets that register (e.g. LDA ,X+) means the
+        value is unknown. STD and other stores return None.
+        """
+        if mnemonic == "CLR":
+            return 0
+        reg = {"STA": "A", "STB": "B"}.get(mnemonic)
+        if reg is None:
+            return None
+        seen = 0
+        for j in range(idx - 1, -1, -1):
+            m = re.match(r'^\s*[0-9A-Fa-f]{4}\s+(?:[0-9A-Fa-f]{2}\s+)+\s*(\w+)\s*(\S*)',
+                         all_lines[j].strip())
+            if not m:
+                if all_lines[j].strip().endswith(":"):
+                    return None  # label = possible branch target, value unknown
+                continue
+            mn, opnd = m.group(1).upper(), m.group(2)
+            if mn == "LD" + reg:
+                im = re.match(r'^#\$([0-9A-Fa-f]{2})$', opnd)
+                return int(im.group(1), 16) if im else None
+            if mn.endswith(reg) and not mn.startswith(("ST", "CMP", "BIT", "TST")):
+                return None  # register modified by something else
+            if mn in ("LDD", "MUL", "TFR", "EXG", "PULS", "PULU") or \
+               (reg == "A" and mn == "DAA"):
+                return None
+            seen += 1
+            if seen >= 3:
+                return None
         return None
 
     def _decode_gime_value(self, reg_addr: int, value: int) -> str | None:
         """Decode a value written to a GIME register into human-readable bits."""
         if reg_addr == 0xFF90:
-            parts = []
-            if value & 0x80: parts.append("CoCo compat")
-            else: parts.append("CoCo3 mode")
+            parts = ["CoCo compat video" if value & 0x80 else "CoCo3 video"]
             if value & 0x40: parts.append("MMU on")
             if value & 0x20: parts.append("GIME IRQ")
             if value & 0x10: parts.append("GIME FIRQ")
-            return ", ".join(parts) if parts else None
+            if value & 0x08: parts.append("$FExx const RAM")
+            if value & 0x04: parts.append("std SCS")
+            parts.append(["16K int+16K ext ROM", "16K int+16K ext ROM",
+                          "32K internal ROM", "32K external ROM"][value & 0x03])
+            return ", ".join(parts)
         if reg_addr == 0xFF91:
             task = "Task1" if value & 0x01 else "Task0"
-            tins = "14.31MHz" if value & 0x20 else "63.695us"
+            tins = "3.58MHz (279ns)" if value & 0x20 else "line rate (63.5us)"
             return f"{task}, timer={tins}"
+        if reg_addr == 0xFF98:
+            lpr = ["1", "1", "2", "8", "9", "10", "11", "inf"][value & 0x07]
+            parts = ["graphics" if value & 0x80 else "text"]
+            if value & 0x20: parts.append("BPI")
+            if value & 0x10: parts.append("mono composite")
+            parts.append("50Hz" if value & 0x08 else "60Hz")
+            parts.append(f"{lpr} lines/row")
+            return ", ".join(parts)
         if reg_addr == 0xFF92 or reg_addr == 0xFF93:
             kind = "IRQ" if reg_addr == 0xFF92 else "FIRQ"
             parts = []
@@ -335,10 +413,19 @@ class PatternAnnotator:
             if value & 0x01: parts.append("EI0")
             return f"{kind}: {'+'.join(parts)}" if parts else f"{kind}: none"
         if reg_addr == 0xFF99:
-            lpf = ["192", "200", "210", "225"][(value >> 5) & 0x03]
-            hres_bytes = [16, 20, 32, 40, 64, 80, 128, 160][(value >> 2) & 0x07]
+            # Text/graphics interpretation depends on $FF98 BP, which isn't
+            # known here, so both readings are given.
+            hres = (value >> 2) & 0x07
+            lpf = ["192", "199", "inf", "225"][(value >> 5) & 0x03]
+            hres_bytes = [16, 20, 32, 40, 64, 80, 128, 160][hres]
+            text_cols = [32, 40, 32, 40, 64, 80, 64, 80][hres]
             cres = ["2col", "4col", "16col", "?"][(value & 0x03)]
-            return f"{lpf} lines, {hres_bytes} bytes/row, {cres}"
+            attr = "+attr" if value & 0x01 else ""
+            return (f"{lpf} lines, gfx {hres_bytes} B/row {cres}"
+                    f" | text {text_cols} cols{attr}")
+        if reg_addr == 0xFF9F:
+            hven = "HVEN, " if value & 0x80 else ""
+            return f"{hven}X offset {(value & 0x7F) * 2} bytes"
         return None
 
     def _decode_mmu_write(self, reg_addr: int, value: int | None) -> str:
@@ -357,9 +444,10 @@ class PatternAnnotator:
         """Annotate a palette register write with RGB decode."""
         idx = reg_addr - 0xFFB0
         if value is not None:
-            r = (value >> 4) & 0x03
-            g = (value >> 2) & 0x03
-            b = value & 0x03
+            # CoCo 3 RGB bit order is R1 G1 B1 R0 G0 B0 (b5..b0)
+            r = ((value >> 4) & 0x02) | ((value >> 2) & 0x01)
+            g = ((value >> 3) & 0x02) | ((value >> 1) & 0x01)
+            b = ((value >> 2) & 0x02) | (value & 0x01)
             return f"; PAL_{idx} = RGB({r},{g},{b})"
         return f"; PAL_{idx}"
 
@@ -369,7 +457,9 @@ class PatternAnnotator:
 # ============================================================
 
 def do_split(args):
-    """Split ASM file into chunks based on sections JSON."""
+    """Split an ASM file into chunk files at the section boundaries from
+    xref.py --sections, writing manifest.json alongside them (see module
+    docstring for the chunk file layout)."""
     with open(args.asm, "r") as f:
         asm_lines = f.readlines()
 
@@ -388,6 +478,23 @@ def do_split(args):
         "total_chunks": len(sections),
         "chunks": [],
     }
+
+    # Sanity check: the section map must describe the same addresses as the
+    # listing. A mismatch (e.g. dasm6809 and xref.py run with different
+    # --org/--raw) would otherwise silently yield 1-line chunks.
+    asm_addrs = [a for a in (parse_address_from_line(l) for l in asm_lines[first_code_idx:])
+                 if a is not None]
+    if asm_addrs and sections:
+        lo, hi = min(asm_addrs), max(asm_addrs)
+        outside = [s["id"] for s in sections
+                   if int(s["end_addr_hex"], 16) < lo or int(s["start_addr_hex"], 16) > hi]
+        if len(outside) * 2 > len(sections):
+            sys.exit(f"Error: {len(outside)} of {len(sections)} sections lie outside the "
+                     f"listing's range ${lo:04X}-${hi:04X}. Run xref.py with the same "
+                     f"--org/--raw flags as dasm6809.py.")
+        for cid in outside:
+            print(f"Warning: section {cid} is outside the listing range "
+                  f"${lo:04X}-${hi:04X}", file=sys.stderr)
 
     for section in sections:
         chunk_id = section["id"]
@@ -509,7 +616,13 @@ def do_annotate(args):
 # ============================================================
 
 def do_merge(args):
-    """Merge annotated chunks back into a single file."""
+    """Merge annotated chunks back into a single file.
+
+    Takes the EQU header once from the first chunk, then for every chunk
+    keeps only the body after CODE_MARKER — stripping the per-chunk header
+    that was duplicated for annotation context. Falls back to finding the
+    first ORG line if a chunk lost its marker.
+    """
     with open(args.manifest, "r") as f:
         manifest = json.load(f)
 

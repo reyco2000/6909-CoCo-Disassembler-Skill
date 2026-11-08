@@ -11,14 +11,23 @@ import sys
 import argparse
 from collections import defaultdict
 try:
-    from tools.dasm6809 import (Disassembler6809, MemoryImage, load_decb_bin,
+    from tools.dasm6809 import (Disassembler6809, MemoryImage, load_input,
                                  ROM_LABELS, HW_LABELS, hw_comment)
 except ImportError:
-    from dasm6809 import (Disassembler6809, MemoryImage, load_decb_bin,
+    from dasm6809 import (Disassembler6809, MemoryImage, load_input,
                            ROM_LABELS, HW_LABELS, hw_comment)
 
 
 class CrossReferenceBuilder:
+    """Builds call/jump/data-reference maps over a unified MemoryImage.
+
+    Reuses Disassembler6809's instruction decoder in a single linear sweep,
+    then offers two outputs: format_report() (human-readable text) and
+    format_sections() (JSON chunk map consumed by annotator.py --split).
+    All maps key on absolute addresses; "from" maps are keyed by the
+    referencing instruction, "to" maps by the target.
+    """
+
     def __init__(self, mem: MemoryImage, exec_addr: int = None):
         self.mem = mem
         self.exec_addr = exec_addr
@@ -202,9 +211,19 @@ class CrossReferenceBuilder:
         return "\n".join(out)
 
     def format_sections(self, chunk_target: int = 500, max_chunks: int = None) -> str:
-        """Output JSON section map with logical boundaries for chunked annotation.
+        """Output a JSON section map with logical boundaries for chunked annotation.
+
+        Sections start at subroutine entries and range starts, so chunks never
+        split a subroutine. Adjacent sections are greedily merged until a chunk
+        reaches ~1.3x chunk_target instructions. Each chunk is enriched with
+        its subroutines, ROM calls, HW accesses, and cross-chunk call links —
+        this becomes the context header annotator.py puts on each chunk file.
+
         chunk_target: target instructions per chunk (default 500).
-        max_chunks: if set, override chunk_target to produce at most this many chunks."""
+        max_chunks: if set, derives chunk_target from the total instruction
+        count instead, producing at most roughly this many chunks (floor 200
+        instructions per chunk).
+        """
         import json
 
         ranges = self.mem.get_contiguous_ranges()
@@ -335,7 +354,8 @@ def main():
     parser = argparse.ArgumentParser(description="6809 Cross-Reference Builder")
     parser.add_argument("file", help="Binary file to analyze")
     parser.add_argument("--org", type=lambda x: int(x, 0), default=None,
-                        help="Origin address (auto-detected for DECB BIN)")
+                        help="Origin address (auto-detected for DECB BIN; inferred from ROM "
+                             "signatures for raw images — same rules as dasm6809)")
     parser.add_argument("--output", "-o", help="Output file")
     parser.add_argument("--sections", action="store_true",
                         help="Output JSON section map for chunked annotation")
@@ -350,21 +370,8 @@ def main():
     with open(args.file, "rb") as f:
         raw = f.read()
 
-    mem = MemoryImage()
-    exec_addr = None
-
-    if not args.raw and len(raw) > 5 and raw[0] == 0x00:
-        segments, exec_addr = load_decb_bin(raw)
-        if segments:
-            print(f"; DECB BIN — {len(segments)} segment(s), unified analysis", file=sys.stderr)
-            for seg_org, seg_data in segments:
-                mem.load_segment(seg_org, seg_data)
-        else:
-            org = args.org if args.org is not None else 0x0E00
-            mem.load_segment(org, raw)
-    else:
-        org = args.org if args.org is not None else 0x0E00
-        mem.load_segment(org, raw)
+    mem, exec_addr, desc = load_input(raw, args.org, args.raw)
+    print(desc, file=sys.stderr)
 
     xref = CrossReferenceBuilder(mem, exec_addr=exec_addr)
     xref.analyze()
