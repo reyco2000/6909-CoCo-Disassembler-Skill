@@ -13,7 +13,7 @@ Motorola/Tandy ROM conventions.
 - `reference/coco_memory_map.md` — memory map and hardware registers (PIA, SAM, VDG, FDC, GIME, MMU)
 - `reference/rom_entry_points.md` — known ROM subroutines (Color/Extended/Disk/Super Extended BASIC)
 - `roms/` — input binaries; `output/` — generated listings
-- `.claude/skills/` — coco-disassemble, analyze-rom, trace-calls; `.claude/commands/coco-help.md`
+- `.claude/skills/` — coco-disassemble, coco-analyze-rom, coco-trace-calls; `.claude/commands/coco-help.md`
 
 All tools support `--help` for flags.
 
@@ -22,8 +22,8 @@ All tools support `--help` for flags.
 Prefer the skills — they encode the token-efficient pipelines:
 
 - `/coco-disassemble <file>` — annotated disassembly (chunked; main agent reads only the manifest)
-- `/analyze-rom <file>` — ROM structure, subroutine map, vector table
-- `/trace-calls <file>` — execution flow and call graph
+- `/coco-analyze-rom <file>` — ROM structure, subroutine map, vector table
+- `/coco-trace-calls <file>` — execution flow and call graph
 - `/coco-help <topic>` — quick reference lookup
 
 ## Analysis Priorities

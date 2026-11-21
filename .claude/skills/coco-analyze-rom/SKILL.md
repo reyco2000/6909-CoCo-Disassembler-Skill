@@ -1,5 +1,5 @@
 ---
-name: analyze-rom
+name: coco-analyze-rom
 description: "Use when the user asks to analyze, identify, or map the structure of a CoCo ROM image (vector table, subroutine boundaries, ROM type)."
 ---
 

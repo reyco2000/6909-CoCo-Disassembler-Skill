@@ -1,5 +1,5 @@
 ---
-name: trace-calls
+name: coco-trace-calls
 description: "Use when the user asks for a call graph, call tree, execution flow, or control-flow map of a 6809/CoCo program."
 ---
 

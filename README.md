@@ -12,9 +12,9 @@ claude
 
 # Available slash commands:
 /coco-disassemble <file>   # Full disassembly with annotations
-/analyze-rom <file>        # Deep ROM image analysis
-/trace-calls <file>        # Call graph and execution flow
-/coco-help <topic>         # Quick reference lookup
+/coco-analyze-rom <file>   # Deep ROM image analysis
+/coco-trace-calls <file>   # Call graph and execution flow
+/coco-help <topic>          # Quick reference lookup
 ```
 
 ## Setup
