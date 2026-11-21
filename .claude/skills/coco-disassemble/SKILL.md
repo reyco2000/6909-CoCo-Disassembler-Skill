@@ -9,7 +9,8 @@ Produces annotated LWASM-compatible assembly via a chunked pipeline that keeps
 main-agent context small: read only tool stdout and the manifest — never the
 full ASM or xref output.
 
-Run all commands from `/home/pi/coco-6809-agent/` (paths below are relative).
+Run all commands from the root of this toolset (the folder that holds `tools/`
+and `reference/`, wherever you cloned it); paths below are relative to it.
 `<name>` = input file basename.
 
 **Fast mode**: if the user says "fast" or passes `--fast`, skip step 7. The
